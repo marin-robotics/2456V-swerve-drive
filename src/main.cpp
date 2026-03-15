@@ -290,8 +290,6 @@ void opcontrol() {
 	bool running = true;
 	while (running) {		
 		ViperDrive.update_position();
-		ViperDrive.update_blocker();
-
 		if (controller.get_digital_new_press(DIGITAL_L2)){ // Toggle matchloading mode
 			match_load_mode = !match_load_mode;
 
