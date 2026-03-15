@@ -6,9 +6,6 @@
 #include "pros/adi.hpp"
 #include "pros/gps.hpp"
 
-// Wing Pneumatics
-#define WING_PNEUMATIC 'A'
-
 // Controller
 extern pros::Controller controller;
 

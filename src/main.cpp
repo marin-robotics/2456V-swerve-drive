@@ -1,4 +1,5 @@
 #include "main.h"
+#include "pros/motors.h"
 #include "pros/motors.hpp"
 #include <algorithm>
 #include <cmath>
@@ -9,54 +10,71 @@
 using namespace std;
 
 pros::Controller controller(pros::E_CONTROLLER_MASTER);	
-pros::GPS gps(13);
+pros::GPS gps(11);
 pros::c::gps_status_s_t gps_status;
 
-// Primary Drive Motors
-pros::Motor left_primary(19, pros::E_MOTOR_GEAR_BLUE, false, pros::E_MOTOR_ENCODER_DEGREES);
-pros::Motor center_primary(9, pros::E_MOTOR_GEAR_BLUE, false, pros::E_MOTOR_ENCODER_DEGREES);
-pros::Motor right_primary(10,pros::E_MOTOR_GEAR_BLUE, false, pros::E_MOTOR_ENCODER_DEGREES);
-pros::Motor_Group primary_motors {left_primary, center_primary, right_primary};
+pros::Motor front_left_primary(5, pros::E_MOTOR_GEAR_BLUE, false, pros::E_MOTOR_ENCODER_DEGREES);
+pros::Motor front_right_primary(3, pros::E_MOTOR_GEAR_BLUE, false, pros::E_MOTOR_ENCODER_DEGREES);
+pros::Motor back_left_primary(10,pros::E_MOTOR_GEAR_BLUE, false, pros::E_MOTOR_ENCODER_DEGREES);
+pros::Motor back_right_primary(4,pros::E_MOTOR_GEAR_BLUE, false, pros::E_MOTOR_ENCODER_DEGREES);
 
-// Angle Drive Motors
-pros::Motor left_angle(18, pros::E_MOTOR_GEAR_GREEN, false, pros::E_MOTOR_ENCODER_DEGREES);
-pros::Motor center_angle(17, pros::E_MOTOR_GEAR_GREEN, false, pros::E_MOTOR_ENCODER_DEGREES);
-pros::Motor right_angle(21,pros::E_MOTOR_GEAR_GREEN, false, pros::E_MOTOR_ENCODER_DEGREES);
-pros::Motor_Group angle_motors {left_angle, center_angle, right_angle};
+pros::Motor front_left_angle(9, pros::E_MOTOR_GEAR_GREEN, true, pros::E_MOTOR_ENCODER_DEGREES);
+pros::Motor front_right_angle(1, pros::E_MOTOR_GEAR_GREEN, true, pros::E_MOTOR_ENCODER_DEGREES);
+pros::Motor back_left_angle(21,pros::E_MOTOR_GEAR_GREEN, true, pros::E_MOTOR_ENCODER_DEGREES);
+pros::Motor back_right_angle(2,pros::E_MOTOR_GEAR_GREEN, true, pros::E_MOTOR_ENCODER_DEGREES);
 
-// Shooter Motors
-pros::Motor shooter_top(16, pros::E_MOTOR_GEAR_RED, true, pros::E_MOTOR_ENCODER_DEGREES);
-pros::Motor shooter_bottom(20, pros::E_MOTOR_GEAR_RED, false, pros::E_MOTOR_ENCODER_DEGREES);
-pros::Motor_Group shooter_motors {shooter_top, shooter_bottom};
+pros::Motor_Group primary_motors {front_left_primary, front_right_primary, back_left_primary, back_right_primary};
+pros::Motor_Group angle_motors {front_left_angle, front_right_angle, back_left_angle, back_right_angle};
 
-// Wing Pneumatics
-#define WING_PNEUMATIC 'A'
-pros::ADIDigitalOut wings(WING_PNEUMATIC);  
+pros::Motor shooter(19, pros::E_MOTOR_GEAR_RED, false, pros::E_MOTOR_ENCODER_DEGREES);
+
+pros::ADIDigitalIn triball_loaded(6); // 8 is H, 1 is A
+pros::ADIDigitalIn shooter_ready(7);
+pros::ADIDigitalIn auton_selector(8);
 
 // Customizable parameters
-int swerve_size = 3;
 int primaries_rpm = 600;
-bool field_oriented = true; // Default State
-
-// Program variables
+bool field_oriented = true;
 double override_theta;
 double override_mag = primaries_rpm*0.6;
-double angle_gear_ratio = 5.5/3;
 int field_orient_offset = -90;
+std::string routes[6] = { "Red Defense", "Red Offense", "Red Nothing", "Blue Defense", "Blue Offense", "Blue Nothing"};
+int selected = 0;
 
 // Swerve Variables
-vector<double> default_angles = {60, 180, 300}; // (2*PI/3), (4*PI/3), (PI/3)}; // //L, R, C 
-vector<PolarVector> module_vectors(swerve_size, PolarVector {0,0});
+RobotController ViperDrive;
+vector<double> default_angles = {45, 315, 135, 225}; //FL, FR, BL, BR 
+vector<PolarVector> module_vectors(ViperDrive.swerve_size, PolarVector {0,0});
 RectangularVector translate_vector;
 RectangularVector yaw_vector;
 PolarVector summed_polar_vector;
 vector<PolarVector> final_vectors;
-RobotController ViperDrive;
+double kP = 4.23; // k-vars for proportional and derivative components
+double kD = 0;
 
-enum TEAM_COLOR {
-	RED,
-	BLUE
-};
+// Mechanism Variables
+bool shooting = false;
+bool match_load_mode = false;
+bool first_loop = true;
+
+void fire_shooter(){
+	if (!first_loop){
+		if (triball_loaded.get_value()){ // When triball detected
+			pros::delay(150); 			 // Wait a moment (to not hit a hand)
+			shooter.move_velocity(-127); // And then run the motor to fire
+			pros::delay(250);			 // For 250 milliseconds
+			shooter.move_velocity(0);
+		}
+	}
+	else {
+		first_loop = false;
+	}
+	while (!shooter_ready.get_value()){ // Winding up until limit switch detects being fully winded 
+		shooter.move_velocity(-120);
+	}
+	shooter.move_velocity(0);
+}
+
 
 /**
  * Runs initialization code. This occurs as soon as the program is started.
@@ -66,13 +84,13 @@ enum TEAM_COLOR {
  */
 void initialize() {
 	pros::lcd::initialize();
-	// selector::init(); 
 	primary_motors.set_brake_modes(pros::E_MOTOR_BRAKE_HOLD);
 	angle_motors.set_brake_modes(pros::E_MOTOR_BRAKE_HOLD);
+	shooter.set_brake_mode(pros::E_MOTOR_BRAKE_HOLD);
 	angle_motors.tare_position();
-	angle_motors.set_zero_position(90*angle_gear_ratio); // Reset coordinate frame to set the current position to 90 degrees
-	shooter_motors.move_relative(360, 127); // Wind up shooter
+	angle_motors.set_zero_position(90*ViperDrive.angle_gear_ratio); // Reset coordinate frame
 	gps.set_rotation(0);
+	ViperDrive.set_team_color(RED);
 
 }
 
@@ -93,21 +111,17 @@ void disabled() {}
  * starts.
  */
 void competition_initialize() {
-	// Calculate the correct coordinate frame shift for each side
-	int team;
-	while ("WOOOHOOO"){
-		// cout << (selector::auton);
-		// 
-		// if (selector::auton > 0){ // red side
-		// 	field_orient_offset = -90.0;
-		// 	team = RED;
-		// 	pros::lcd::print(5, "Red Alliance Configuration");
-		// } 
-		// else { // blue side
-		// 	field_orient_offset = 90.0;
-		// 	team = BLUE;
-		// 	pros::lcd::print(5, "Blue Alliance Configuration");
-		// }
+	// Select auton
+	while (true){
+		if (auton_selector.get_new_press()) {
+			if (selected > sizeof(routes)/sizeof(routes[0])-2){
+				selected = 0;
+			} else {
+				selected ++;
+			}
+		}
+		pros::screen::print(TEXT_SMALL, 1, "Selected: %s", routes[selected]);
+		pros::delay(20);
 	}
 }
 
@@ -123,21 +137,7 @@ void competition_initialize() {
  * from where it left off.
  */
 void autonomous() {
-	int initial_time = pros::millis();
-	while (true){
-		ViperDrive.update_position();
-		
-	}
-}
-
-
-/**
- * Resets modules to absolute zero to untangle wires at the end of a match.
-*/
-void reset_modules(){ // Rethink this shit
-	for (int i = 0; i < swerve_size; i++){
-		angle_motors[i].move_absolute((90*angle_gear_ratio), 200);
-	}
+	ViperDrive.autonomous(selected);
 }
 
 /**
@@ -161,14 +161,14 @@ vector<PolarVector> scale_vectors(vector<PolarVector> vectors, double translate_
 
 	// Get maximum magnitude of the vectors
 	double max_magnitude = 0;
-	for (int i = 0; i < swerve_size; i++){
+	for (int i = 0; i < ViperDrive.swerve_size; i++){
 		if (vectors[i].mag > max_magnitude) {max_magnitude = vectors[i].mag;}
 	}
 
 	if (max_magnitude == 0) {max_magnitude = 1;} // Acount for dividing by zero error
 
 	// Scale vectors accordingly
-	for (int i = 0; i < swerve_size; i++){
+	for (int i = 0; i < ViperDrive.swerve_size; i++){
 		vectors[i].mag /= max_magnitude; // Normalizes
 		vectors[i].mag *= max(translate_magnitude, yaw_magnitude); // multiply by the largest of the two magnitudes 
 														   // to avoid vectors with 0 magnitude
@@ -182,29 +182,31 @@ vector<PolarVector> scale_vectors(vector<PolarVector> vectors, double translate_
  * Updates each swerve module with the given vectors, 
  * taken in polar coordinates.
  * @param polar_translate_vector A PolarVector containing the translational vector applied in swerve drive.
- * @param yaw_magnitude A value for the yaw applied in swerve drive; negative turns left, positive turns right. From 
+ * @param yaw_magnitude A valu`e for the yaw applied in swerve drive; negative turns left, positive turns right. From 
  * 		
 */
 
-vector<PolarVector> calculate_vectors(PolarVector polar_translate_vector, double yaw_magnitude, CommandType orientation) { // Static variables here are swerve size, default angles
-	
+SwerveModuleTelemetry update_modules(PolarVector polar_translate_vector, double yaw_magnitude, CommandType orientation) { // Static variables here are swerve size, default angles
+	// Telemetry data to return
+	vector<double> angle_errors(ViperDrive.swerve_size, 0); // Error values for the angle motors (final - current positions)
+	vector<double> angle_velocities(ViperDrive.swerve_size, 0); // Angle motor velocities
+	vector<double> primary_velocities(ViperDrive.swerve_size, 0);
+	int largest_angle_error = 0;
+
 	// Convert translational vector to add it with the rotational
 	RectangularVector translate_vector = polar_to_rect(polar_translate_vector);
-
+	
 	// If the motion request is based on the absolute angle relative to the field, adjust eh  
 	if (orientation == ABSOLUTE) { 
 		translate_vector = rotate_rect_vect(translate_vector, (ViperDrive.current_angle+field_orient_offset));
 	}
 
 	// Create all yaw vectors & sum them with translate vector to create summed module vectors
-	for (int i = 0; i < swerve_size; i++){
+	for (int i = 0; i < ViperDrive.swerve_size; i++){
 		// Create yaw vector
-		PolarVector polar_yaw_vector {yaw_magnitude, default_angles[i]};
+		PolarVector polar_yaw_vector {-yaw_magnitude, default_angles[i]+180};
 		RectangularVector yaw_vector = polar_to_rect(polar_yaw_vector);
-		if (i==1) { 
-			pros::screen::print(TEXT_SMALL, 5, "Yaw1 PV (m, 0): (%.1f), (%.1f)", polar_yaw_vector.mag, polar_yaw_vector.theta);
-			pros::screen::print(TEXT_SMALL, 6, "Yaw1 RV (x, y): (%.1f), (%.1f)", yaw_vector.x, yaw_vector.y);
-		}
+			
 		// Add yaw with translate
 		RectangularVector summed_rect_vector {yaw_vector.x+translate_vector.x, yaw_vector.y+translate_vector.y};
 		PolarVector summed_vector = rect_to_polar(summed_rect_vector);
@@ -213,22 +215,15 @@ vector<PolarVector> calculate_vectors(PolarVector polar_translate_vector, double
 		module_vectors.at(i) = summed_vector;
 	}
 		
-	return scale_vectors(module_vectors, polar_translate_vector.mag, yaw_magnitude);
-}
-
-vector<vector<double>> apply_vectors(vector<PolarVector> final_vectors){
-	// Telemetry data to return
-	vector<double> angle_errors(swerve_size, 0);
-	vector<double> angle_velocities(swerve_size, 0);
-	vector<double> primary_velocities(swerve_size, 0);
-
+	final_vectors = scale_vectors(module_vectors, polar_translate_vector.mag, -yaw_magnitude);
+	
 	// iterate through all modules & apply calculated vectors
-	for (int i = 0; i < swerve_size; i++){
+	for (int i = 0; i < ViperDrive.swerve_size; i++){
 		pros::Motor& angle_motor = angle_motors[i];
 		pros::Motor& primary_motor = primary_motors[i];
 
-		double target_theta = normalize_angle(final_vectors[i].theta*(180/PI)); // idk why we need this extra conversion here it should be fine?
-		double current_position = normalize_angle(angle_motor.get_position()/angle_gear_ratio); // div by angle_gear_ratio to account for 
+		double target_theta = normalize_angle(final_vectors[i].theta);
+		double current_position = normalize_angle(angle_motor.get_position()/ViperDrive.angle_gear_ratio); // div by angle_gear_ratio to account for 
 																						  // physical gear ratio
 		// closer to flipped goal?
 		double flipped_goal = normalize_angle(target_theta + 180);
@@ -241,14 +236,21 @@ vector<vector<double>> apply_vectors(vector<PolarVector> final_vectors){
 		}
 
 		// Calculate true error between our current position and the new target
-		double error = true_error(target_theta, current_position);
+		double angle_error = true_error(target_theta, current_position);
 		// Log error to return later
-		angle_errors.at(i) = error;
-		   
+		angle_errors.at(i) = angle_error;
+		if (abs(int(angle_error)) > largest_angle_error) {
+			largest_angle_error = abs(int(angle_error));
+		}
+	}
+	pros::lcd::print(4, "Largest Angle Error %d", largest_angle_error);
+	for (int i = 0; i < ViperDrive.swerve_size; i++){  
+		pros::Motor& angle_motor = angle_motors[i];
+		pros::Motor& primary_motor = primary_motors[i];
 		// Change angle at a proportional speed with deadzone based on magnitude
 		if (final_vectors[i].mag > 0.00) // mag > 0?
 		{
-			double angle_motor_velocity = (127.0/30.0) * error; // divisor is the point where speed reaches max
+			double angle_motor_velocity = kP * angle_errors[i] + kD * angle_motor.get_actual_velocity(); // REPLACE THIS WITH PID
 			angle_velocities.at(i) = angle_motor_velocity;
 			angle_motor = angle_motor_velocity;
 
@@ -257,32 +259,16 @@ vector<vector<double>> apply_vectors(vector<PolarVector> final_vectors){
 		}
 
 		// Change primary velocities
-		double primary_motor_velocity = int(final_vectors[i].mag*primaries_rpm);
+		double primary_motor_velocity = int(final_vectors[i].mag*primaries_rpm*cos(largest_angle_error*0.8*(PI/180)));
 		primary_velocities.at(i) = primary_motor_velocity;
 		primary_motor.move_velocity(primary_motor_velocity);
 	}
-	return vector<vector<double>> {angle_errors,angle_velocities,primary_velocities};
-	// print all module data that will be returned
-	// return to update_modules
-}
-
-vector<vector<double>> update_modules(PolarVector polar_translate_vector, double yaw_magnitude, CommandType orientation) {
-	final_vectors = calculate_vectors(polar_translate_vector, yaw_magnitude, orientation);
-	vector<vector<double>> feedback = apply_vectors(final_vectors); // Return errors, primary velocities, and angle velocities... anything else? 
 	
-	vector<double> angle_errors = feedback[0];
-	vector<double> angle_velocities = feedback[1];
-	vector<double> primary_velocities = feedback[2];
-
-	pros::screen::print(TEXT_SMALL, 1, "[Module Data]");
-	pros::screen::print(TEXT_SMALL, 2, "Vector1 (m, 0): (%.2f), (%.2f)", final_vectors[0].mag, final_vectors[0].theta);
-	pros::screen::print(TEXT_SMALL, 3, "Vector2 (m, 0): (%.2f), (%.2f)", final_vectors[1].mag, final_vectors[1].theta);
-	pros::screen::print(TEXT_SMALL, 4, "Vector3 (m, 0): (%.2f), (%.2f)", final_vectors[2].mag, final_vectors[2].theta);
-	// pros::screen::print(TEXT_SMALL, 5, "A MTR E.(#): (%.2f),(%.2f),(%.2f)", angle_errors[0], angle_errors[1], angle_errors[2]);
-	// pros::screen::print(TEXT_SMALL, 6, "A MTR V.(#): (%.2f),(%.2f),(%.2f)", angle_velocities[0], angle_velocities[1], angle_velocities[2]);
-	// pros::screen::print(TEXT_SMALL, 7, "P MTR V.(i,#): (%.0f),(%.0f),(%.0f)", primary_velocities[0], primary_velocities[1], primary_velocities[2]);
-
-	return feedback;
+	SwerveModuleTelemetry telemetryData;
+    telemetryData.angleErrors = angle_errors;
+    telemetryData.angleVelocities = angle_velocities;
+    telemetryData.primaryVelocities = primary_velocities;
+	return telemetryData;
 }
 
 /**
@@ -298,45 +284,24 @@ vector<vector<double>> update_modules(PolarVector polar_translate_vector, double
  * operator control task will be stopped. Re-enabling the robot will restart the
  * task, not resume it from where it left off.
  */
-void fire_shooter() {
-    if (!ViperDrive.currently_shooting) {
-        ViperDrive.currently_shooting = true;
-        double current_position = shooter_top.get_position();
-        shooter_motors.move_relative(current_position+360, 127);
-
-        // // Timeout variables
-        // const int timeout = 3000; // 1000 milliseconds (1 second)
-        // int startTime = pros::millis(); // Current time in milliseconds
-
-        // while (abs(shooter_top.get_position() - 360) > 5) {
-        //     // Check for timeout
-        //     if ((pros::millis() - startTime) > timeout) {
-        //         break; // Exit the loop if timeout is reached
-        //     }
-        //     pros::Task::delay(20);
-        // }
-        ViperDrive.currently_shooting = false;
-    }
-}
 
 void opcontrol() {
 	// loop
 	bool running = true;
-	while (running) {
-		// cout << (selector::auton) << endl;
-		
+	while (running) {		
 		ViperDrive.update_position();
 		ViperDrive.update_blocker();
 
-		if (controller.get_digital(DIGITAL_R1)){
-			shooter_motors = 127;
-			//pros::Task shoot(fire_shooter);
-		}
-		else {
-			shooter_motors = 0;
+		if (controller.get_digital_new_press(DIGITAL_L2)){ // Toggle matchloading mode
+			match_load_mode = !match_load_mode;
+
+			if (match_load_mode){
+				controller.rumble("."); 
+				// one  rumble to signal initialization of matchload mode
+			}
 		}
 
-		if (controller.get_digital_new_press(DIGITAL_L1)){
+		if (controller.get_digital_new_press(DIGITAL_L1)){ // Toggle orientation
 			ViperDrive.toggle_orientation();
 		}
 
@@ -345,43 +310,59 @@ void opcontrol() {
 		double left_x = -pow_with_sign(double(controller.get_analog(ANALOG_LEFT_X)) / 127);
 		double right_x = pow_with_sign(double(controller.get_analog(ANALOG_RIGHT_X)) / 127);
 
+		if (match_load_mode) {
+			shooter.set_brake_mode(pros::E_MOTOR_BRAKE_HOLD);
+			fire_shooter();
+		} else {
+			shooter.set_brake_mode(pros::E_MOTOR_BRAKE_COAST);
+			first_loop = true; // if not matchloading, note that the shooter is not wound up
+		}
+
 		// Strafing on button presses
 		if (controller.get_digital(DIGITAL_A)){
-			ViperDrive.move_in_direction(RELATIVE, 0, 127);
+			ViperDrive.strafe(RELATIVE, 0, 127);
 		}
 		else if (controller.get_digital(DIGITAL_Y)){
-			ViperDrive.move_in_direction(RELATIVE, 0, 127);
+			ViperDrive.strafe(RELATIVE, 180, 127);
 		}
 		else if (controller.get_digital(DIGITAL_X)){
-			ViperDrive.move_in_direction(RELATIVE, 0, 127);
+			ViperDrive.strafe(RELATIVE, 90, 127);
 		}
 		else if (controller.get_digital(DIGITAL_B)){
-			ViperDrive.move_in_direction(RELATIVE, 0, 127);
-		} else {
+			ViperDrive.strafe(RELATIVE, 270, 127);
+		}
+
+		else if (controller.get_digital(DIGITAL_RIGHT)){
+			ViperDrive.strafe(ABSOLUTE, 0, 127);
+		} 
+		else if (controller.get_digital(DIGITAL_UP)){
+			ViperDrive.strafe(ABSOLUTE, 90, 127);
+		}
+		else if (controller.get_digital(DIGITAL_DOWN)){
+			ViperDrive.strafe(ABSOLUTE, 270, 127);
+		}
+		else if (controller.get_digital(DIGITAL_LEFT)){
+			ViperDrive.strafe(ABSOLUTE, 180, 127);
+		} 
+		else if (controller.get_digital(DIGITAL_R1)){
+			ViperDrive.reset_modules(); // reset all module rotations to unwind cords
+		}
+		else {
 			ViperDrive.manual_drive(left_x, left_y, right_x);
 		}
 		
-		if (controller.get_digital_new_press(DIGITAL_L2)){
-			ViperDrive.toggle_blocker();
-		}
-
 		// print gps information to the brain
-		//pros::lcd::print(6, "Yaw: %f", gps_status.yaw);
-		//pros::lcd::print(7, "X: %f Y: %f", gps_status.x, gps_status.y);
+		pros::lcd::print(1, "Yaw: %f", ViperDrive.current_angle);
+		pros::lcd::print(2, "X: %f Y: %f", ViperDrive.current_position.x, ViperDrive.current_position.y);
 		
 		// print out orientation mode to controller
 		if (ViperDrive.controller_orientation == ABSOLUTE){
-			controller.print(1, 0, "Field Oriented");
+			controller.print(1, 0, "[Field] ML: %d", match_load_mode);
 		}
 		else {
-			controller.print(1, 0, "Robot Oriented");
+			controller.print(1, 0, "[Robot] ML: %d", match_load_mode);
 		}
 
-		// reset all module rotations to unwind cords at the end of matches
-		if (controller.get_digital_new_press(DIGITAL_DOWN)){
-			reset_modules();
-		}
-
-		pros::delay(20);
+		pros::delay(20); // Try changing to 17? thats 60Hz
 	}
 }
