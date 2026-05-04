@@ -1,6 +1,6 @@
 # Swerve Drive Robot — VEX Over Under (2024)
 
-**A custom 4-wheel swerve drive robot** built by Marin Robotics team 2456V for the 2024 VEX Robotics "Over Under" competition season. Swerve drive is extremely rare in VEX — nearly all teams use standard tank or mecanum drives. We designed and programmed a drivetrain where all four wheels rotate independently, giving the robot full omnidirectional movement while maintaining the traction advantages of standard wheels.
+**A custom 4-wheel swerve drive robot** built by Marin Robotics team 2456V for the 2024 VEX Robotics ["Over Under"](https://www.youtube.com/watch?v=dvDqEI7qO34) competition season. Swerve drive is extremely rare in VEX — nearly all teams use standard tank or mecanum drives. We designed and programmed a drivetrain where all four wheels rotate independently, giving the robot full omnidirectional movement while maintaining the traction advantages of standard wheels.
 
 <img src="./swerve_drive_final.jpeg" alt="Robot photo" width="500"/>
 
